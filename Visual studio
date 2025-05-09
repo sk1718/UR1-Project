@@ -1,0 +1,209 @@
+Form.cs
+
+using Emgu.CV;
+using Emgu.CV.CvEnum;
+using Emgu.CV.Structure;
+using Emgu.CV.Util;
+using System;
+using System.Drawing;
+using System.IO.Ports;
+using System.Windows.Forms;
+
+namespace YellowLineTracker
+{
+    public partial class Form1 : Form
+    {
+        private VideoCapture _capture;
+        private bool _isRunning = false;
+        private SerialPort _serialPort;
+
+        public Form1()
+        {
+            InitializeComponent();
+            _serialPort = new SerialPort("COM5", 9600);
+            try { _serialPort.Open(); }
+            catch (Exception ex) { MessageBox.Show("Serial Port Error: " + ex.Message); }
+        }
+
+        private void Form1_Load(object sender, EventArgs e)
+        {
+            labelStatus.Text = "Ready";
+        }
+
+        private void StartCapture()
+        {
+            _capture = new VideoCapture(0);
+            _capture.ImageGrabbed += ProcessFrame;
+            _isRunning = true;
+            _capture.Start();
+        }
+
+        private void StopCapture()
+        {
+            _isRunning = false;
+            if (_capture != null)
+            {
+                _capture.ImageGrabbed -= ProcessFrame;
+                _capture.Dispose();
+            }
+        }
+
+        private void ProcessFrame(object sender, EventArgs e)
+        {
+            if (!_isRunning || _capture == null) return;
+
+            Mat frame = new Mat();
+            _capture.Retrieve(frame);
+            var image = frame.ToImage<Bgr, byte>();
+            var hsv = image.Convert<Hsv, byte>();
+
+            // === Yellow Detection ===
+            var yellowMask = hsv.InRange(new Hsv(20, 100, 100), new Hsv(40, 255, 255));
+            var yellowContours = new VectorOfVectorOfPoint();
+            CvInvoke.FindContours(yellowMask.Clone(), yellowContours, null, RetrType.External, ChainApproxMethod.ChainApproxSimple);
+
+            double maxArea = 0;
+            VectorOfPoint largestContour = null;
+
+            for (int i = 0; i < yellowContours.Size; i++)
+            {
+                double area = CvInvoke.ContourArea(yellowContours[i]);
+                if (area > 500 && area > maxArea)
+                {
+                    maxArea = area;
+                    largestContour = yellowContours[i];
+                }
+            }
+
+            // === White and Red Detection ===
+            var whiteMask = hsv.InRange(new Hsv(0, 0, 200), new Hsv(180, 30, 255));
+            var redMask = hsv.InRange(new Hsv(0, 100, 100), new Hsv(10, 255, 255))
+                            .Or(hsv.InRange(new Hsv(160, 100, 100), new Hsv(180, 255, 255)));
+
+            // Define red detection zone at bottom of the image.
+            Rectangle redZone = new Rectangle(0, redMask.Height - 60, redMask.Width, 40);
+            var redBottom = redMask.GetSubRect(redZone);
+
+            string direction = "Searching...";
+
+            // === RED STOP Check ===
+            if (CvInvoke.CountNonZero(redBottom) > 500)
+            {
+                direction = "STOP - RED LINE";
+                SendCommand('x');
+                CvInvoke.PutText(image, direction, new Point(20, 40), FontFace.HersheySimplex, 1.0, new MCvScalar(0, 255, 0), 2);
+                UpdateUI(image, yellowMask, whiteMask, redMask, direction);
+                return; // Immediately halt further processing if red is detected.
+            }
+
+            if (largestContour != null)
+            {
+                Moments m = CvInvoke.Moments(largestContour);
+                int centerX = (int)(m.M10 / (m.M00 + 1e-5));
+                int width = yellowMask.Width;
+
+                // Draw the primary yellow contour for visualization.
+                CvInvoke.DrawContours(image, yellowContours, Array.IndexOf(yellowContours.ToArrayOfArray(), largestContour.ToArray()), new MCvScalar(0, 255, 255), 2);
+
+                // Yellow-line based motion
+                if (centerX < width / 5)
+                {
+                    direction = "SHARP LEFT";
+                    SendCommand('A');
+                }
+                else if (centerX < 2 * width / 5)
+                {
+                    direction = "LEFT";
+                    SendCommand('L');
+                }
+                else if (centerX < 3 * width / 5)
+                {
+                    direction = "STRAIGHT";
+                    SendCommand('s');
+                }
+                else if (centerX < 4 * width / 5)
+                {
+                    direction = "RIGHT";
+                    SendCommand('r');
+                }
+                else
+                {
+                    direction = "SHARP RIGHT";
+                    SendCommand('R');
+                }
+            }
+            else
+            {
+                // === Recovery using white lines ===
+                var leftBoundary = whiteMask.GetSubRect(new Rectangle(0, whiteMask.Height / 2, whiteMask.Width / 5, whiteMask.Height / 2));
+                var rightBoundary = whiteMask.GetSubRect(new Rectangle(whiteMask.Width * 4 / 5, whiteMask.Height / 2, whiteMask.Width / 5, whiteMask.Height / 2));
+                int whiteLeft = CvInvoke.CountNonZero(leftBoundary);
+                int whiteRight = CvInvoke.CountNonZero(rightBoundary);
+
+                if (whiteLeft > whiteRight)
+                {
+                    direction = "RECOVER LEFT";
+                    SendCommand('L');
+                }
+                else if (whiteRight > whiteLeft)
+                {
+                    direction = "RECOVER RIGHT";
+                    SendCommand('R');
+                }
+                else
+                {
+                    direction = "LOST PATH - HALT";
+                    SendCommand('x');
+                }
+            }
+
+            CvInvoke.PutText(image, direction, new Point(20, 40), FontFace.HersheySimplex, 1.0, new MCvScalar(0, 255, 0), 2);
+            UpdateUI(image, yellowMask, whiteMask, redMask, direction);
+        }
+
+        private void UpdateUI(Image<Bgr, byte> img, Image<Gray, byte> yellow, Image<Gray, byte> white, Image<Gray, byte> red, string status)
+        {
+            if (InvokeRequired)
+            {
+                Invoke((MethodInvoker)(() =>
+                {
+                    pictureBoxCamera.Image = img.ToBitmap();
+                    pictureBoxYellow.Image = yellow.ToBitmap();
+                    pictureBoxWhite.Image = white.ToBitmap();
+                    pictureBoxRed.Image = red.ToBitmap();
+                    labelStatus.Text = status;
+                }));
+            }
+            else
+            {
+                pictureBoxCamera.Image = img.ToBitmap();
+                pictureBoxYellow.Image = yellow.ToBitmap();
+                pictureBoxWhite.Image = white.ToBitmap();
+                pictureBoxRed.Image = red.ToBitmap();
+                labelStatus.Text = status;
+            }
+        }
+
+        private void SendCommand(char c)
+        {
+            if (_serialPort.IsOpen)
+            {
+                try { _serialPort.Write(c.ToString()); }
+                catch { }
+            }
+        }
+
+        private void buttonStart_Click(object sender, EventArgs e) => StartCapture();
+        private void buttonStop_Click(object sender, EventArgs e) => StopCapture();
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            StopCapture();
+            if (_serialPort.IsOpen) _serialPort.Close();
+            base.OnFormClosing(e);
+        }
+    }
+}
+
+
+
