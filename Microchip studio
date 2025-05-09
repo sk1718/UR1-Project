@@ -1,0 +1,81 @@
+main.c
+
+#define F_CPU 8000000UL
+#define USART_UBBR_VALUE 51 // Baud = 9600
+
+#include <avr/io.h>
+#include <util/delay.h>
+#include <avr/interrupt.h>
+#include <stdio.h>
+
+#include "A2D_lib.h"
+#include "Serial_lib2.h"
+#include "F_cpu_lib.h"
+#include "Motor_PWM_lib.h"
+#include "LCD_lib.h"  // Optional if You use an LCD
+
+int main(void)
+{
+	char command = ' ';
+	_delay_ms(1000); // Boot delay
+	AD_init();
+	USART_vInit();   // Serial init
+	HBridgeInit();   // Setup motor PWM + direction pins
+	sei();           // Enable interrupts (if needed)
+
+	// Optional: LCD_init(); LCDGoToPosition(1, 1); LCD_PrintString("Ready!");
+
+	while (1)
+	{
+		if (serialCheckRxComplete())
+		{
+			char cmd = USART_vReceiveByte();
+			command = cmd;
+
+			// Echo for debug
+			uart_putchar(command, &mystdout);
+			uart_putchar('\n', &mystdout);
+		}
+
+		// Movement control
+		switch (command)
+		{
+			case 'A':  // Sharp left
+			HBridgeCommand(0, 25, 0);
+			HBridgeCommand(1, 0, 0);
+			break;
+
+			case 'L':  // Mild left
+			HBridgeCommand(0, 25, 0);
+			HBridgeCommand(1, 10, 0);
+			break;
+
+			case 's':  // Straight (lowercase)
+			case 'S':  // Straight (uppercase from C#)
+			HBridgeCommand(0, 25, 0);
+			HBridgeCommand(1, 25, 0);
+			break;
+
+			case 'r':  // Mild right
+			HBridgeCommand(0, 10, 0);
+			HBridgeCommand(1, 25, 0);
+			break;
+
+			case 'R':  // Sharp right
+			HBridgeCommand(0, 0, 0);
+			HBridgeCommand(1, 25, 0);
+			break;
+
+			case 'x':  // Stop lowercase
+			case 'X':  // Stop uppercase
+			HBridgeCommand(0, 0, 0);
+			HBridgeCommand(1, 0, 0);
+			break;
+
+			default:   // Unrecognized ? Stop
+			HBridgeCommand(0, 0, 0);
+			HBridgeCommand(1, 0, 0);
+			break;
+		}
+	}
+}
